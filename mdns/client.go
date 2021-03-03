@@ -1,4 +1,4 @@
-package main
+package mdns
 
 import (
 	"context"
@@ -15,9 +15,10 @@ import (
 
 // Discovery defaults.
 const (
-	mDNSIP4  = "224.0.0.251"
-	mDNSIP6  = "ff02::fb"
-	mDNSPort = 5353
+	mDNSIP4             = "224.0.0.251"
+	mDNSIP6             = "ff02::fb"
+	mDNSPort            = 5353
+	defaultBrowsePeriod = 60
 )
 
 var (
@@ -27,26 +28,14 @@ var (
 
 type Config struct {
 	ForceUnicastResponses bool
+	BindIPAddressV4       net.IP
+	BindIPAddressV6       net.IP
 	MinTTL                uint32
+	BrowseServices        []string
+	BrowsePeriod          uint32
 }
 
-type cacheEntry struct {
-	expires time.Time
-	rr      dns.RR
-}
-
-func (e *cacheEntry) ttl(now time.Time) uint32 {
-	if ttl := e.expires.Sub(now).Seconds(); ttl > 0 {
-		return uint32(ttl)
-	}
-	return 0
-}
-
-func (e *cacheEntry) cname() *dns.CNAME {
-	return e.rr.(*dns.CNAME)
-}
-
-type mDNSClient struct {
+type Client struct {
 	Config
 	// Unicast
 	uc4, uc6 *net.UDPConn
@@ -63,9 +52,15 @@ type mDNSClient struct {
 	msgs     chan *dns.Msg
 }
 
-func newmDNSClient(config *Config) (*mDNSClient, error) {
-	uc4, _ := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
-	uc6, _ := net.ListenUDP("udp6", &net.UDPAddr{IP: net.IPv6zero, Port: 0})
+func New(config *Config) (*Client, error) {
+	if config.BindIPAddressV4 == nil {
+		config.BindIPAddressV4 = net.IPv4zero
+	}
+	if config.BindIPAddressV6 == nil {
+		config.BindIPAddressV6 = net.IPv6zero
+	}
+	uc4, _ := net.ListenUDP("udp4", &net.UDPAddr{IP: config.BindIPAddressV4, Port: 0})
+	uc6, _ := net.ListenUDP("udp6", &net.UDPAddr{IP: config.BindIPAddressV6, Port: 0})
 	if uc4 == nil && uc6 == nil {
 		return nil, errors.New("Failed to bind to any unicast UDP port")
 	}
@@ -84,7 +79,11 @@ func newmDNSClient(config *Config) (*mDNSClient, error) {
 
 	msgs := make(chan *dns.Msg, 32)
 
-	c := &mDNSClient{
+	if config.BrowsePeriod == 0 {
+		config.BrowsePeriod = defaultBrowsePeriod
+	}
+
+	c := &Client{
 		Config:   *config,
 		uc4:      uc4,
 		uc6:      uc6,
@@ -103,14 +102,14 @@ func newmDNSClient(config *Config) (*mDNSClient, error) {
 	go c.recv(c.mc6, msgs)
 
 	go c.autoPurgeCache()
-	go c.serviceQuery("_workstation._tcp.local")
+	go c.autoServiceQuery()
 
 	go c.processMessages()
 
 	return c, nil
 }
 
-func (c *mDNSClient) newCacheEntry(rr dns.RR, now time.Time) *cacheEntry {
+func (c *Client) newCacheEntry(rr dns.RR, now time.Time) *cacheEntry {
 	ttl := rr.Header().Ttl
 	if ttl < c.MinTTL {
 		ttl = c.MinTTL
@@ -121,7 +120,7 @@ func (c *mDNSClient) newCacheEntry(rr dns.RR, now time.Time) *cacheEntry {
 	}
 }
 
-func (c *mDNSClient) Close() error {
+func (c *Client) Close() error {
 	if !atomic.CompareAndSwapInt32(&c.closed, 0, 1) {
 		// something else already closed it
 		return nil
@@ -143,7 +142,7 @@ func (c *mDNSClient) Close() error {
 	return nil
 }
 
-func (c *mDNSClient) purgeCache() {
+func (c *Client) purgeCache() {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 
@@ -168,7 +167,7 @@ func (c *mDNSClient) purgeCache() {
 	}
 }
 
-func (c *mDNSClient) autoPurgeCache() {
+func (c *Client) autoPurgeCache() {
 	ticker := time.NewTicker(1 * time.Minute)
 	for {
 		select {
@@ -180,7 +179,7 @@ func (c *mDNSClient) autoPurgeCache() {
 	}
 }
 
-func (c *mDNSClient) processMessages() {
+func (c *Client) processMessages() {
 	for {
 		select {
 		case <-c.closedCh:
@@ -217,7 +216,7 @@ func (c *mDNSClient) processMessages() {
 	}
 }
 
-func (c *mDNSClient) getCachedAnswers(domain string, recordType uint16, cnames map[string]dns.RR) []dns.RR {
+func (c *Client) getCachedAnswers(domain string, recordType uint16, cnames map[string]dns.RR) []dns.RR {
 	chain, target := c.resolveCname(domain)
 
 	var answers []dns.RR
@@ -255,13 +254,12 @@ func (c *mDNSClient) getCachedAnswers(domain string, recordType uint16, cnames m
 			followup = append(followup, c.getCachedAnswers(srv.Target, dns.TypeA, cnames)...)
 			followup = append(followup, c.getCachedAnswers(srv.Target, dns.TypeAAAA, cnames)...)
 		}
-
 	}
 
 	return append(answers, followup...)
 }
 
-func (c *mDNSClient) resolveCname(target string) ([]dns.RR, string) {
+func (c *Client) resolveCname(target string) ([]dns.RR, string) {
 	var chain []dns.RR
 	now := time.Now()
 	for {
@@ -275,24 +273,35 @@ func (c *mDNSClient) resolveCname(target string) ([]dns.RR, string) {
 	}
 }
 
-func (c *mDNSClient) serviceQuery(domain string) {
-	for {
-		domain = strings.Trim(domain, ".") + "."
-		q := new(dns.Msg)
-		q.SetQuestion(domain, dns.TypePTR)
-		q.Question[0].Qclass |= 1 << 15
-		q.RecursionDesired = false
-		if err := c.send(q); err != nil {
-			log.Printf("error: %s", err)
-		}
-		time.Sleep(60 * time.Second)
+func (c *Client) serviceQuery(service string) {
+	service = strings.Trim(service, ".") + "."
+	q := new(dns.Msg)
+	q.SetQuestion(service, dns.TypePTR)
+	q.Question[0].Qclass |= 1 << 15
+	q.RecursionDesired = false
+	if err := c.send(q); err != nil {
+		log.Printf("error: %s", err)
 	}
 }
 
-func (c *mDNSClient) QueryRecords(ctx context.Context, name string, questionTypes ...uint16) ([]dns.RR, error) {
-	name = strings.Trim(name, ".") + "."
+func (c *Client) autoServiceQuery() {
+	ticker := time.NewTicker(time.Duration(c.BrowsePeriod) * time.Second)
+	for {
+		select {
+		case <-ticker.C:
+			for _, s := range c.BrowseServices {
+				c.serviceQuery(s)
+			}
+		case <-c.closedCh:
+			return
+		}
+	}
+}
 
+func (c *Client) QueryRecords(ctx context.Context, name string, questionTypes ...uint16) ([]dns.RR, error) {
+	name = strings.Trim(name, ".") + "."
 	questions := make([]dns.Question, len(questionTypes))
+
 	for i, recordType := range questionTypes {
 		questions[i] = dns.Question{
 			Name:   name,
@@ -303,7 +312,7 @@ func (c *mDNSClient) QueryRecords(ctx context.Context, name string, questionType
 	return c.query(ctx, questions...)
 }
 
-func (c *mDNSClient) query(ctx context.Context, questions ...dns.Question) ([]dns.RR, error) {
+func (c *Client) query(ctx context.Context, questions ...dns.Question) ([]dns.RR, error) {
 	// Start listening for response packets
 
 	// RFC 6762, section 18.12.  Repurposing of Top Bit of qclass in Question
@@ -378,7 +387,7 @@ func (c *mDNSClient) query(ctx context.Context, questions ...dns.Question) ([]dn
 	return nil, ctx.Err()
 }
 
-func (c *mDNSClient) recv(l *net.UDPConn, msgCh chan *dns.Msg) {
+func (c *Client) recv(l *net.UDPConn, msgCh chan *dns.Msg) {
 	if l == nil {
 		return
 	}
@@ -409,7 +418,7 @@ func (c *mDNSClient) recv(l *net.UDPConn, msgCh chan *dns.Msg) {
 	}
 }
 
-func (c *mDNSClient) send(q *dns.Msg) error {
+func (c *Client) send(q *dns.Msg) error {
 	buf, err := q.Pack()
 	if err != nil {
 		return err
