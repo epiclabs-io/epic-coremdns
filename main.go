@@ -16,13 +16,13 @@ func main() {
 		log.Fatal(err)
 	}
 
-	q := func(domain string, id int, recordType uint16) {
+	q := func(domain string, id int, recordTypes ...uint16) {
 		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 		defer cancel()
 
-		answers, err := client.query(ctx, domain, recordType)
+		answers, err := client.QueryRecords(ctx, domain, recordTypes...)
 		if err != nil {
-			log.Fatal(err)
+			//		log.Fatal(err)
 		}
 		fmt.Println(id, answers)
 	}
@@ -30,12 +30,15 @@ func main() {
 	//	q("trantor.local", 1)
 	//q("Bticino-Classe100X.local", 2)
 	//q("perry.local", 3)
-	q("esphometest.local", 5, dns.TypeA)
+	q("perry.local", 5, dns.TypeA, dns.TypeAAAA)
+	q("perry.local", 6, dns.TypeCNAME)
+
 	time.Sleep(2 * time.Second)
 
 	go func() {
 		for {
 			q("_workstation._tcp.local", 6, dns.TypePTR)
+			q("myservice._workstation._tcp.local", 7, dns.TypeSRV)
 			time.Sleep(1 * time.Second)
 		}
 	}()

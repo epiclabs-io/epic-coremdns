@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log"
 	"net"
 	"strings"
@@ -33,6 +32,10 @@ type cacheEntry struct {
 	expires time.Time
 	rr      dns.RR
 }
+type cnameEntry struct {
+	expires time.Time
+	cname   dns.CNAME
+}
 
 type mDNSClient struct {
 	// Unicast
@@ -45,6 +48,7 @@ type mDNSClient struct {
 	closedCh chan struct{}
 	lock     sync.RWMutex
 	cache    map[string][]cacheEntry
+	cnames   map[string]*cnameEntry
 	signal   chan struct{}
 	msgs     chan *dns.Msg
 }
@@ -79,6 +83,7 @@ func newmDNSClient() (*mDNSClient, error) {
 		signal:   make(chan struct{}),
 		msgs:     msgs,
 		cache:    make(map[string][]cacheEntry),
+		cnames:   make(map[string]*cnameEntry),
 	}
 
 	go c.recv(c.uc4, msgs)
@@ -98,6 +103,13 @@ func newCacheEntry(rr dns.RR) cacheEntry {
 	return cacheEntry{
 		expires: time.Now().Add(time.Second * time.Duration(rr.Header().Ttl)),
 		rr:      rr,
+	}
+}
+
+func newCnameEntry(cname *dns.CNAME) *cnameEntry {
+	return &cnameEntry{
+		expires: time.Now().Add(time.Second * time.Duration(cname.Header().Ttl)),
+		cname:   *cname,
 	}
 }
 
@@ -140,6 +152,11 @@ func (c *mDNSClient) purgeCache() {
 		} else {
 			delete(c.cache, domain)
 		}
+		for domain, entry := range c.cnames {
+			if entry.expires.After(now) {
+				delete(c.cnames, domain)
+			}
+		}
 	}
 }
 
@@ -164,21 +181,23 @@ func (c *mDNSClient) processMessages() {
 			func() {
 				c.lock.Lock()
 				defer c.lock.Unlock()
-				fmt.Println("begin reply", replies.Id)
 				records := append(replies.Answer, replies.Extra...)
 			process_replies:
 				for _, record := range records {
 					name := record.Header().Name
-					entries := c.cache[name]
-					for i, entry := range entries {
-						if dns.IsDuplicate(entry.rr, record) {
-							entries[i] = newCacheEntry(record)
-							continue process_replies
+					if record.Header().Rrtype == dns.TypeCNAME {
+						c.cnames[name] = newCnameEntry(record.(*dns.CNAME))
+					} else {
+						entries := c.cache[name]
+						for i, entry := range entries {
+							if dns.IsDuplicate(entry.rr, record) {
+								entries[i] = newCacheEntry(record)
+								continue process_replies
+							}
 						}
+						c.cache[name] = append(entries, newCacheEntry(record))
 					}
-					c.cache[name] = append(entries, newCacheEntry(record))
 				}
-				fmt.Println("end reply", replies.Id)
 			}()
 			s := c.signal
 			c.signal = make(chan struct{})
@@ -187,12 +206,15 @@ func (c *mDNSClient) processMessages() {
 	}
 }
 
-func (c *mDNSClient) getCachedAnswers(domain string, recordType uint16) []dns.RR {
+func (c *mDNSClient) getCachedAnswers(domain string, recordType uint16, cnames map[string]dns.RR) []dns.RR {
 	c.lock.Lock()
 	defer c.lock.Unlock()
+
+	chain, target := c.resolveCname(domain)
+
 	var answers []dns.RR
 
-	entries := c.cache[domain]
+	entries := c.cache[target]
 	if entries != nil {
 		now := time.Now()
 		for _, entry := range entries {
@@ -203,7 +225,24 @@ func (c *mDNSClient) getCachedAnswers(domain string, recordType uint16) []dns.RR
 			}
 		}
 	}
+	if len(answers) > 0 {
+		for _, cname := range chain {
+			cnames[cname.Header().Name] = cname
+		}
+	}
 	return answers
+}
+
+func (c *mDNSClient) resolveCname(target string) ([]dns.RR, string) {
+	var chain []dns.RR
+	for {
+		entry := c.cnames[target]
+		if entry == nil {
+			return chain, target
+		}
+		chain = append(chain, &entry.cname)
+		target = entry.cname.Target
+	}
 }
 
 func (c *mDNSClient) serviceQuery(domain string) {
@@ -211,7 +250,6 @@ func (c *mDNSClient) serviceQuery(domain string) {
 		domain = strings.Trim(domain, ".") + "."
 		q := new(dns.Msg)
 		q.SetQuestion(domain, dns.TypePTR)
-		q.Id = 9999
 		q.Question[0].Qclass |= 1 << 15
 		q.RecursionDesired = false
 		if err := c.send(q); err != nil {
@@ -221,46 +259,87 @@ func (c *mDNSClient) serviceQuery(domain string) {
 	}
 }
 
-func (c *mDNSClient) query(ctx context.Context, domain string, recordType uint16) ([]dns.RR, error) {
+func (c *mDNSClient) QueryRecords(ctx context.Context, name string, questionTypes ...uint16) ([]dns.RR, error) {
+	name = strings.Trim(name, ".") + "."
+
+	questions := make([]dns.Question, len(questionTypes))
+	for i, recordType := range questionTypes {
+		questions[i] = dns.Question{
+			Name:   name,
+			Qtype:  recordType,
+			Qclass: dns.ClassINET,
+		}
+	}
+	return c.query(ctx, questions...)
+}
+
+func (c *mDNSClient) query(ctx context.Context, questions ...dns.Question) ([]dns.RR, error) {
 	// Start listening for response packets
 
-	domain = strings.Trim(domain, ".") + "."
-	q := new(dns.Msg)
-	q.SetQuestion(domain, recordType)
-	q.Id = 9997
 	// RFC 6762, section 18.12.  Repurposing of Top Bit of qclass in Question
 	// Section
 	//
 	// In the Question Section of a Multicast DNS query, the top bit of the qclass
 	// field is used to indicate that unicast responses are preferred for this
 	// particular question.  (See Section 5.4.)
-	q.Question[0].Qclass |= 1 << 15
-	q.RecursionDesired = false
+	for _, q := range questions {
+		q.Qclass |= 1 << 15
+	}
 
-	answers := c.getCachedAnswers(domain, recordType)
-	if len(answers) > 0 {
+	msg := new(dns.Msg)
+	msg.Id = dns.Id()
+	msg.Question = questions
+	msg.RecursionDesired = false
+
+	fillAnswers := func() []dns.RR {
+		var records []dns.RR
+		cnames := make(map[string]dns.RR)
+		for _, question := range questions {
+			if question.Qtype == dns.TypeCNAME {
+				c.lock.Lock()
+				entry := c.cnames[question.Name]
+				c.lock.Unlock()
+				if entry == nil {
+					return nil
+				}
+				records = append(records, &entry.cname)
+			} else {
+				cachedAnswers := c.getCachedAnswers(question.Name, question.Qtype, cnames)
+				if len(cachedAnswers) == 0 {
+					return nil
+				}
+				records = append(records, cachedAnswers...)
+			}
+		}
+		answers := make([]dns.RR, 0, len(cnames)+len(records))
+		for _, cname := range cnames {
+			answers = append(answers, cname)
+		}
+		return append(answers, records...)
+	}
+
+	if answers := fillAnswers(); answers != nil {
 		return answers, nil
 	}
 
 	ticker := time.NewTicker(200 * time.Millisecond)
 
-	if err := c.send(q); err != nil {
+	if err := c.send(msg); err != nil {
 		return nil, err
 	}
 
 	for ctx.Err() == nil {
 		select {
 		case <-ticker.C:
-			if err := c.send(q); err != nil {
+			if err := c.send(msg); err != nil {
 				return nil, err
 			}
 		case <-c.signal:
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
-		answers := c.getCachedAnswers(domain, recordType)
-		if len(answers) > 0 {
-			return answers, nil
+		if records := fillAnswers(); records != nil {
+			return records, nil
 		}
 	}
 
