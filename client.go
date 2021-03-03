@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -95,24 +94,6 @@ func newmDNSClient() (*mDNSClient, error) {
 	return c, nil
 }
 
-func getRecordIP(record dns.RR) (ip net.IP) {
-	switch record.(type) {
-	case *dns.A:
-		a := record.(*dns.A)
-		ip = a.A
-	case *dns.AAAA:
-		a := record.(*dns.AAAA)
-		ip = a.AAAA
-	default:
-		panic("record must be an AAAA or A record")
-	}
-	return
-}
-
-func IPEquals(r1, r2 dns.RR) bool {
-	return bytes.Equal(getRecordIP(r1), getRecordIP(r2))
-}
-
 func newCacheEntry(rr dns.RR) cacheEntry {
 	return cacheEntry{
 		expires: time.Now().Add(time.Second * time.Duration(rr.Header().Ttl)),
@@ -181,31 +162,21 @@ func (c *mDNSClient) processMessages() {
 			return
 		case replies := <-c.msgs:
 			func() {
-				if replies.Id != 9997 && replies.Id != 9999 {
-					return
-				}
 				c.lock.Lock()
 				defer c.lock.Unlock()
 				fmt.Println("begin reply", replies.Id)
 				records := append(replies.Answer, replies.Extra...)
-				if len(records) == 0 {
-					fmt.Println("replies", replies)
-				}
 			process_replies:
 				for _, record := range records {
-					fmt.Println(record)
-					switch record.(type) {
-					case *dns.A, *dns.AAAA:
-						name := record.Header().Name
-						entries := c.cache[name]
-						for i, entry := range entries {
-							if IPEquals(entry.rr, record) {
-								entries[i] = newCacheEntry(record)
-								continue process_replies
-							}
+					name := record.Header().Name
+					entries := c.cache[name]
+					for i, entry := range entries {
+						if dns.IsDuplicate(entry.rr, record) {
+							entries[i] = newCacheEntry(record)
+							continue process_replies
 						}
-						c.cache[name] = append(entries, newCacheEntry(record))
 					}
+					c.cache[name] = append(entries, newCacheEntry(record))
 				}
 				fmt.Println("end reply", replies.Id)
 			}()
@@ -216,7 +187,7 @@ func (c *mDNSClient) processMessages() {
 	}
 }
 
-func (c *mDNSClient) getCachedAnswers(domain string) []dns.RR {
+func (c *mDNSClient) getCachedAnswers(domain string, recordType uint16) []dns.RR {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 	var answers []dns.RR
@@ -225,7 +196,7 @@ func (c *mDNSClient) getCachedAnswers(domain string) []dns.RR {
 	if entries != nil {
 		now := time.Now()
 		for _, entry := range entries {
-			if entry.expires.After(now) {
+			if entry.rr.Header().Rrtype == recordType && entry.expires.After(now) {
 				rr := entry.rr
 				rr.Header().Ttl = uint32(entry.expires.Sub(now).Seconds())
 				answers = append(answers, rr)
@@ -250,12 +221,12 @@ func (c *mDNSClient) serviceQuery(domain string) {
 	}
 }
 
-func (c *mDNSClient) query(ctx context.Context, domain string) ([]dns.RR, error) {
+func (c *mDNSClient) query(ctx context.Context, domain string, recordType uint16) ([]dns.RR, error) {
 	// Start listening for response packets
 
 	domain = strings.Trim(domain, ".") + "."
 	q := new(dns.Msg)
-	q.SetQuestion(domain, dns.TypeA)
+	q.SetQuestion(domain, recordType)
 	q.Id = 9997
 	// RFC 6762, section 18.12.  Repurposing of Top Bit of qclass in Question
 	// Section
@@ -266,7 +237,7 @@ func (c *mDNSClient) query(ctx context.Context, domain string) ([]dns.RR, error)
 	q.Question[0].Qclass |= 1 << 15
 	q.RecursionDesired = false
 
-	answers := c.getCachedAnswers(domain)
+	answers := c.getCachedAnswers(domain, recordType)
 	if len(answers) > 0 {
 		return answers, nil
 	}
@@ -287,7 +258,7 @@ func (c *mDNSClient) query(ctx context.Context, domain string) ([]dns.RR, error)
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
-		answers := c.getCachedAnswers(domain)
+		answers := c.getCachedAnswers(domain, recordType)
 		if len(answers) > 0 {
 			return answers, nil
 		}
