@@ -15,12 +15,9 @@ import (
 
 // Discovery defaults.
 const (
-	DefaultMDNSTimeout = 5 * time.Second
-
-	mDNSIP4               = "224.0.0.251"
-	mDNSIP6               = "ff02::fb"
-	mDNSPort              = 5353
-	forceUnicastResponses = false
+	mDNSIP4  = "224.0.0.251"
+	mDNSIP6  = "ff02::fb"
+	mDNSPort = 5353
 )
 
 var (
@@ -28,16 +25,29 @@ var (
 	mDNSAddr6 = &net.UDPAddr{IP: net.ParseIP(mDNSIP6), Port: mDNSPort}
 )
 
+type Config struct {
+	ForceUnicastResponses bool
+	MinTTL                uint32
+}
+
 type cacheEntry struct {
 	expires time.Time
 	rr      dns.RR
 }
-type cnameEntry struct {
-	expires time.Time
-	cname   dns.CNAME
+
+func (e *cacheEntry) ttl(now time.Time) uint32 {
+	if ttl := e.expires.Sub(now).Seconds(); ttl > 0 {
+		return uint32(ttl)
+	}
+	return 0
+}
+
+func (e *cacheEntry) cname() *dns.CNAME {
+	return e.rr.(*dns.CNAME)
 }
 
 type mDNSClient struct {
+	Config
 	// Unicast
 	uc4, uc6 *net.UDPConn
 
@@ -47,13 +57,13 @@ type mDNSClient struct {
 	closed   int32
 	closedCh chan struct{}
 	lock     sync.RWMutex
-	cache    map[string][]cacheEntry
-	cnames   map[string]*cnameEntry
+	cache    map[string][]*cacheEntry
+	cnames   map[string]*cacheEntry
 	signal   chan struct{}
 	msgs     chan *dns.Msg
 }
 
-func newmDNSClient() (*mDNSClient, error) {
+func newmDNSClient(config *Config) (*mDNSClient, error) {
 	uc4, _ := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
 	uc6, _ := net.ListenUDP("udp6", &net.UDPAddr{IP: net.IPv6zero, Port: 0})
 	if uc4 == nil && uc6 == nil {
@@ -75,6 +85,7 @@ func newmDNSClient() (*mDNSClient, error) {
 	msgs := make(chan *dns.Msg, 32)
 
 	c := &mDNSClient{
+		Config:   *config,
 		uc4:      uc4,
 		uc6:      uc6,
 		mc4:      mc4,
@@ -82,8 +93,8 @@ func newmDNSClient() (*mDNSClient, error) {
 		closedCh: make(chan struct{}),
 		signal:   make(chan struct{}),
 		msgs:     msgs,
-		cache:    make(map[string][]cacheEntry),
-		cnames:   make(map[string]*cnameEntry),
+		cache:    make(map[string][]*cacheEntry),
+		cnames:   make(map[string]*cacheEntry),
 	}
 
 	go c.recv(c.uc4, msgs)
@@ -99,17 +110,14 @@ func newmDNSClient() (*mDNSClient, error) {
 	return c, nil
 }
 
-func newCacheEntry(rr dns.RR) cacheEntry {
-	return cacheEntry{
-		expires: time.Now().Add(time.Second * time.Duration(rr.Header().Ttl)),
-		rr:      rr,
+func (c *mDNSClient) newCacheEntry(rr dns.RR, now time.Time) *cacheEntry {
+	ttl := rr.Header().Ttl
+	if ttl < c.MinTTL {
+		ttl = c.MinTTL
 	}
-}
-
-func newCnameEntry(cname *dns.CNAME) *cnameEntry {
-	return &cnameEntry{
-		expires: time.Now().Add(time.Second * time.Duration(cname.Header().Ttl)),
-		cname:   *cname,
+	return &cacheEntry{
+		expires: now.Add(time.Second * time.Duration(ttl)),
+		rr:      rr,
 	}
 }
 
@@ -141,7 +149,7 @@ func (c *mDNSClient) purgeCache() {
 
 	now := time.Now()
 	for domain, entries := range c.cache {
-		var newEntries []cacheEntry
+		var newEntries []*cacheEntry
 		for _, entry := range entries {
 			if entry.expires.After(now) {
 				newEntries = append(newEntries, entry)
@@ -182,20 +190,23 @@ func (c *mDNSClient) processMessages() {
 				c.lock.Lock()
 				defer c.lock.Unlock()
 				records := append(replies.Answer, replies.Extra...)
+				now := time.Now()
 			process_replies:
 				for _, record := range records {
 					name := record.Header().Name
 					if record.Header().Rrtype == dns.TypeCNAME {
-						c.cnames[name] = newCnameEntry(record.(*dns.CNAME))
+						c.cnames[name] = c.newCacheEntry(record.(*dns.CNAME), now)
 					} else {
 						entries := c.cache[name]
 						for i, entry := range entries {
 							if dns.IsDuplicate(entry.rr, record) {
-								entries[i] = newCacheEntry(record)
+								if record.Header().Ttl > entry.ttl(now) {
+									entries[i] = c.newCacheEntry(record, now)
+								}
 								continue process_replies
 							}
 						}
-						c.cache[name] = append(entries, newCacheEntry(record))
+						c.cache[name] = append(entries, c.newCacheEntry(record, now))
 					}
 				}
 			}()
@@ -207,41 +218,60 @@ func (c *mDNSClient) processMessages() {
 }
 
 func (c *mDNSClient) getCachedAnswers(domain string, recordType uint16, cnames map[string]dns.RR) []dns.RR {
-	c.lock.Lock()
-	defer c.lock.Unlock()
-
 	chain, target := c.resolveCname(domain)
 
 	var answers []dns.RR
 
 	entries := c.cache[target]
+	now := time.Now()
 	if entries != nil {
-		now := time.Now()
 		for _, entry := range entries {
 			if entry.rr.Header().Rrtype == recordType && entry.expires.After(now) {
 				rr := entry.rr
-				rr.Header().Ttl = uint32(entry.expires.Sub(now).Seconds())
+				rr.Header().Ttl = entry.ttl(now)
 				answers = append(answers, rr)
 			}
 		}
 	}
-	if len(answers) > 0 {
-		for _, cname := range chain {
-			cnames[cname.Header().Name] = cname
-		}
+	if len(answers) == 0 {
+		return nil
 	}
-	return answers
+
+	for _, cname := range chain {
+		cnames[cname.Header().Name] = cname
+	}
+
+	var followup []dns.RR
+	switch recordType {
+	case dns.TypePTR:
+		for _, rr := range answers {
+			ptr := rr.(*dns.PTR)
+			followup = append(followup, c.getCachedAnswers(ptr.Ptr, dns.TypeTXT, cnames)...)
+			followup = append(followup, c.getCachedAnswers(ptr.Ptr, dns.TypeSRV, cnames)...)
+		}
+	case dns.TypeSRV:
+		for _, rr := range answers {
+			srv := rr.(*dns.SRV)
+			followup = append(followup, c.getCachedAnswers(srv.Target, dns.TypeA, cnames)...)
+			followup = append(followup, c.getCachedAnswers(srv.Target, dns.TypeAAAA, cnames)...)
+		}
+
+	}
+
+	return append(answers, followup...)
 }
 
 func (c *mDNSClient) resolveCname(target string) ([]dns.RR, string) {
 	var chain []dns.RR
+	now := time.Now()
 	for {
 		entry := c.cnames[target]
 		if entry == nil {
 			return chain, target
 		}
-		chain = append(chain, &entry.cname)
-		target = entry.cname.Target
+		entry.rr.Header().Ttl = entry.ttl(now)
+		chain = append(chain, entry.rr)
+		target = entry.cname().Target
 	}
 }
 
@@ -255,7 +285,7 @@ func (c *mDNSClient) serviceQuery(domain string) {
 		if err := c.send(q); err != nil {
 			log.Printf("error: %s", err)
 		}
-		time.Sleep(1 * time.Second)
+		time.Sleep(60 * time.Second)
 	}
 }
 
@@ -282,8 +312,10 @@ func (c *mDNSClient) query(ctx context.Context, questions ...dns.Question) ([]dn
 	// In the Question Section of a Multicast DNS query, the top bit of the qclass
 	// field is used to indicate that unicast responses are preferred for this
 	// particular question.  (See Section 5.4.)
-	for _, q := range questions {
-		q.Qclass |= 1 << 15
+	if c.ForceUnicastResponses {
+		for _, q := range questions {
+			q.Qclass |= 1 << 15
+		}
 	}
 
 	msg := new(dns.Msg)
@@ -294,15 +326,15 @@ func (c *mDNSClient) query(ctx context.Context, questions ...dns.Question) ([]dn
 	fillAnswers := func() []dns.RR {
 		var records []dns.RR
 		cnames := make(map[string]dns.RR)
+		c.lock.Lock()
+		defer c.lock.Unlock()
 		for _, question := range questions {
 			if question.Qtype == dns.TypeCNAME {
-				c.lock.Lock()
 				entry := c.cnames[question.Name]
-				c.lock.Unlock()
 				if entry == nil {
 					return nil
 				}
-				records = append(records, &entry.cname)
+				records = append(records, entry.rr)
 			} else {
 				cachedAnswers := c.getCachedAnswers(question.Name, question.Qtype, cnames)
 				if len(cachedAnswers) == 0 {
@@ -361,6 +393,14 @@ func (c *mDNSClient) recv(l *net.UDPConn, msgCh chan *dns.Msg) {
 		if err := msg.Unpack(buf[:n]); err != nil {
 			continue
 		}
+		if msg.Response == false {
+			continue
+		}
+
+		for _, rr := range msg.Answer {
+			rr.Header().Class &= 0x7FFF
+		}
+
 		select {
 		case msgCh <- msg:
 		case <-c.closedCh:
