@@ -2,7 +2,6 @@ package mdns
 
 import (
 	"context"
-	"errors"
 	"log"
 	"net"
 	"strings"
@@ -10,20 +9,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/epiclabs-io/epicmdns/mdns/udptransport"
 	"github.com/miekg/dns"
+	"github.com/tilinna/clock"
 )
 
 // Discovery defaults.
 const (
-	mDNSIP4             = "224.0.0.251"
-	mDNSIP6             = "ff02::fb"
-	mDNSPort            = 5353
 	defaultBrowsePeriod = 60
-)
-
-var (
-	mDNSAddr4 = &net.UDPAddr{IP: net.ParseIP(mDNSIP4), Port: mDNSPort}
-	mDNSAddr6 = &net.UDPAddr{IP: net.ParseIP(mDNSIP6), Port: mDNSPort}
 )
 
 type Config struct {
@@ -33,23 +26,19 @@ type Config struct {
 	MinTTL                uint32
 	BrowseServices        []string
 	BrowsePeriod          uint32
+	Transport             Transport
 }
+
+var Clock = clock.Realtime()
 
 type Client struct {
 	Config
-	// Unicast
-	uc4, uc6 *net.UDPConn
-
-	// Multicast
-	mc4, mc6 *net.UDPConn
-
 	closed   int32
 	closedCh chan struct{}
 	lock     sync.RWMutex
 	cache    map[string][]*cacheEntry
 	cnames   map[string]*cacheEntry
-	signal   chan struct{}
-	msgs     chan *dns.Msg
+	signal   *signal
 }
 
 func New(config *Config) (*Client, error) {
@@ -59,25 +48,16 @@ func New(config *Config) (*Client, error) {
 	if config.BindIPAddressV6 == nil {
 		config.BindIPAddressV6 = net.IPv6zero
 	}
-	uc4, _ := net.ListenUDP("udp4", &net.UDPAddr{IP: config.BindIPAddressV4, Port: 0})
-	uc6, _ := net.ListenUDP("udp6", &net.UDPAddr{IP: config.BindIPAddressV6, Port: 0})
-	if uc4 == nil && uc6 == nil {
-		return nil, errors.New("Failed to bind to any unicast UDP port")
-	}
-
-	mc4, _ := net.ListenMulticastUDP("udp4", nil, mDNSAddr4)
-	mc6, _ := net.ListenMulticastUDP("udp6", nil, mDNSAddr6)
-	if uc4 == nil && uc6 == nil {
-		if uc4 != nil {
-			_ = uc4.Close()
+	if config.Transport == nil {
+		transport, err := udptransport.New(&udptransport.Config{
+			BindIPAddressV4: config.BindIPAddressV4,
+			BindIPAddressV6: config.BindIPAddressV6,
+		})
+		if err != nil {
+			return nil, err
 		}
-		if uc6 != nil {
-			_ = uc6.Close()
-		}
-		return nil, errors.New("Failed to bind to any multicast TCP port")
+		config.Transport = transport
 	}
-
-	msgs := make(chan *dns.Msg, 32)
 
 	if config.BrowsePeriod == 0 {
 		config.BrowsePeriod = defaultBrowsePeriod
@@ -85,26 +65,16 @@ func New(config *Config) (*Client, error) {
 
 	c := &Client{
 		Config:   *config,
-		uc4:      uc4,
-		uc6:      uc6,
-		mc4:      mc4,
-		mc6:      mc6,
 		closedCh: make(chan struct{}),
-		signal:   make(chan struct{}),
-		msgs:     msgs,
+		signal:   newSignal(),
 		cache:    make(map[string][]*cacheEntry),
 		cnames:   make(map[string]*cacheEntry),
 	}
 
-	go c.recv(c.uc4, msgs)
-	go c.recv(c.uc6, msgs)
-	go c.recv(c.mc4, msgs)
-	go c.recv(c.mc6, msgs)
-
 	go c.autoPurgeCache()
 	go c.autoServiceQuery()
 
-	go c.processMessages()
+	go c.messageLoop()
 
 	return c, nil
 }
@@ -126,19 +96,7 @@ func (c *Client) Close() error {
 		return nil
 	}
 	close(c.closedCh)
-	if c.uc4 != nil {
-		_ = c.uc4.Close()
-	}
-	if c.uc6 != nil {
-		_ = c.uc6.Close()
-	}
-	if c.mc4 != nil {
-		_ = c.mc4.Close()
-	}
-	if c.mc6 != nil {
-		_ = c.mc6.Close()
-	}
-
+	c.Transport.Close()
 	return nil
 }
 
@@ -146,7 +104,7 @@ func (c *Client) purgeCache() {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 
-	now := time.Now()
+	now := Clock.Now()
 	for domain, entries := range c.cache {
 		var newEntries []*cacheEntry
 		for _, entry := range entries {
@@ -168,7 +126,7 @@ func (c *Client) purgeCache() {
 }
 
 func (c *Client) autoPurgeCache() {
-	ticker := time.NewTicker(1 * time.Minute)
+	ticker := Clock.NewTicker(1 * time.Minute)
 	for {
 		select {
 		case <-ticker.C:
@@ -179,39 +137,41 @@ func (c *Client) autoPurgeCache() {
 	}
 }
 
-func (c *Client) processMessages() {
+func (c *Client) processMessage(reply *dns.Msg) {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	records := append(reply.Answer, reply.Extra...)
+	now := Clock.Now()
+
+process_replies:
+	for _, record := range records {
+		name := record.Header().Name
+		if record.Header().Rrtype == dns.TypeCNAME {
+			c.cnames[name] = c.newCacheEntry(record.(*dns.CNAME), now)
+		} else {
+			entries := c.cache[name]
+			for i, entry := range entries {
+				if dns.IsDuplicate(entry.rr, record) {
+					if record.Header().Ttl > entry.ttl(now) {
+						entries[i] = c.newCacheEntry(record, now)
+					}
+					continue process_replies
+				}
+			}
+			c.cache[name] = append(entries, c.newCacheEntry(record, now))
+		}
+	}
+}
+
+func (c *Client) messageLoop() {
 	for {
 		select {
 		case <-c.closedCh:
 			return
-		case replies := <-c.msgs:
-			func() {
-				c.lock.Lock()
-				defer c.lock.Unlock()
-				records := append(replies.Answer, replies.Extra...)
-				now := time.Now()
-			process_replies:
-				for _, record := range records {
-					name := record.Header().Name
-					if record.Header().Rrtype == dns.TypeCNAME {
-						c.cnames[name] = c.newCacheEntry(record.(*dns.CNAME), now)
-					} else {
-						entries := c.cache[name]
-						for i, entry := range entries {
-							if dns.IsDuplicate(entry.rr, record) {
-								if record.Header().Ttl > entry.ttl(now) {
-									entries[i] = c.newCacheEntry(record, now)
-								}
-								continue process_replies
-							}
-						}
-						c.cache[name] = append(entries, c.newCacheEntry(record, now))
-					}
-				}
-			}()
-			s := c.signal
-			c.signal = make(chan struct{})
-			close(s)
+		case reply := <-c.Transport.Receive():
+			c.processMessage(reply)
+			c.signal.raise()
 		}
 	}
 }
@@ -222,7 +182,7 @@ func (c *Client) getCachedAnswers(domain string, recordType uint16, cnames map[s
 	var answers []dns.RR
 
 	entries := c.cache[target]
-	now := time.Now()
+	now := Clock.Now()
 	if entries != nil {
 		for _, entry := range entries {
 			if entry.rr.Header().Rrtype == recordType && entry.expires.After(now) {
@@ -261,7 +221,7 @@ func (c *Client) getCachedAnswers(domain string, recordType uint16, cnames map[s
 
 func (c *Client) resolveCname(target string) ([]dns.RR, string) {
 	var chain []dns.RR
-	now := time.Now()
+	now := Clock.Now()
 	for {
 		entry := c.cnames[target]
 		if entry == nil {
@@ -279,13 +239,13 @@ func (c *Client) serviceQuery(service string) {
 	q.SetQuestion(service, dns.TypePTR)
 	q.Question[0].Qclass |= 1 << 15
 	q.RecursionDesired = false
-	if err := c.send(q); err != nil {
+	if err := c.Transport.Send(q); err != nil {
 		log.Printf("error: %s", err)
 	}
 }
 
 func (c *Client) autoServiceQuery() {
-	ticker := time.NewTicker(time.Duration(c.BrowsePeriod) * time.Second)
+	ticker := Clock.NewTicker(time.Duration(c.BrowsePeriod) * time.Second)
 	for {
 		select {
 		case <-ticker.C:
@@ -312,6 +272,35 @@ func (c *Client) QueryRecords(ctx context.Context, name string, questionTypes ..
 	return c.Query(ctx, questions...)
 }
 
+func (c *Client) answerQuestions(questions []dns.Question) []dns.RR {
+	var records []dns.RR
+	cnames := make(map[string]dns.RR)
+
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	for _, question := range questions {
+		if question.Qtype == dns.TypeCNAME {
+			entry := c.cnames[question.Name]
+			if entry == nil {
+				return nil
+			}
+			records = append(records, entry.rr)
+		} else {
+			cachedAnswers := c.getCachedAnswers(question.Name, question.Qtype, cnames)
+			if len(cachedAnswers) == 0 {
+				return nil
+			}
+			records = append(records, cachedAnswers...)
+		}
+	}
+	answers := make([]dns.RR, 0, len(cnames)+len(records))
+	for _, cname := range cnames {
+		answers = append(answers, cname)
+	}
+	return copyRecords(append(answers, records...))
+}
+
 func (c *Client) Query(ctx context.Context, questions ...dns.Question) ([]dns.RR, error) {
 	// Start listening for response packets
 
@@ -332,106 +321,32 @@ func (c *Client) Query(ctx context.Context, questions ...dns.Question) ([]dns.RR
 	msg.Question = questions
 	msg.RecursionDesired = false
 
-	fillAnswers := func() []dns.RR {
-		var records []dns.RR
-		cnames := make(map[string]dns.RR)
-		c.lock.Lock()
-		defer c.lock.Unlock()
-		for _, question := range questions {
-			if question.Qtype == dns.TypeCNAME {
-				entry := c.cnames[question.Name]
-				if entry == nil {
-					return nil
-				}
-				records = append(records, entry.rr)
-			} else {
-				cachedAnswers := c.getCachedAnswers(question.Name, question.Qtype, cnames)
-				if len(cachedAnswers) == 0 {
-					return nil
-				}
-				records = append(records, cachedAnswers...)
-			}
-		}
-		answers := make([]dns.RR, 0, len(cnames)+len(records))
-		for _, cname := range cnames {
-			answers = append(answers, cname)
-		}
-		return copyRecords(append(answers, records...))
-	}
-
-	if answers := fillAnswers(); answers != nil {
+	if answers := c.answerQuestions(questions); answers != nil {
 		return answers, nil
 	}
 
-	ticker := time.NewTicker(200 * time.Millisecond)
+	ticker := Clock.NewTicker(200 * time.Millisecond)
 
-	if err := c.send(msg); err != nil {
+	if err := c.Transport.Send(msg); err != nil {
 		return nil, err
 	}
 
 	for ctx.Err() == nil {
 		select {
 		case <-ticker.C:
-			if err := c.send(msg); err != nil {
+			if err := c.Transport.Send(msg); err != nil {
 				return nil, err
 			}
-		case <-c.signal:
+		case <-c.signal.wait():
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
-		if records := fillAnswers(); records != nil {
+		if records := c.answerQuestions(questions); records != nil {
 			return records, nil
 		}
 	}
 
 	return nil, ctx.Err()
-}
-
-func (c *Client) recv(l *net.UDPConn, msgCh chan *dns.Msg) {
-	if l == nil {
-		return
-	}
-
-	buf := make([]byte, 65536)
-	for {
-		n, err := l.Read(buf)
-		if err != nil {
-			continue
-		}
-		msg := new(dns.Msg)
-		if err := msg.Unpack(buf[:n]); err != nil {
-			continue
-		}
-		if msg.Response == false {
-			continue
-		}
-
-		for _, rr := range msg.Answer {
-			rr.Header().Class &= 0x7FFF
-		}
-
-		select {
-		case msgCh <- msg:
-		case <-c.closedCh:
-			return
-		}
-	}
-}
-
-func (c *Client) send(q *dns.Msg) error {
-	buf, err := q.Pack()
-	if err != nil {
-		return err
-	}
-
-	if c.uc4 != nil {
-		c.uc4.WriteToUDP(buf, mDNSAddr4)
-	}
-	if c.uc6 != nil {
-		c.uc6.WriteToUDP(buf, mDNSAddr6)
-	}
-
-	return nil
 }
 
 func copyRecords(source []dns.RR) []dns.RR {
