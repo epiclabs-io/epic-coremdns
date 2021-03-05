@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net"
 	"strconv"
+	"strings"
 
 	"github.com/coredns/caddy"
 	"github.com/epiclabs-io/epicmdns/mdns"
@@ -18,7 +19,7 @@ func parseConfig(c *caddy.Controller) (*config, error) {
 	var config config
 	c.Next()
 	if c.NextArg() {
-		config.domain = c.Val()
+		config.domain = "." + strings.TrimSuffix(c.Val(), ".") + "."
 		if c.NextBlock() {
 			for {
 				key := c.Val()

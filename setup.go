@@ -4,6 +4,9 @@ import (
 	"fmt"
 
 	"github.com/coredns/caddy"
+	"github.com/coredns/coredns/core/dnsserver"
+	"github.com/coredns/coredns/plugin"
+	"github.com/epiclabs-io/epicmdns/mdns"
 )
 
 func init() {
@@ -18,6 +21,25 @@ func setup(c *caddy.Controller) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println(*config)
+
+	mdnsClient, err := mdns.New(&config.Config)
+	if err != nil {
+		return err
+	}
+	p := Plugin{
+		mdns:   mdnsClient,
+		domain: config.domain,
+	}
+
+	c.OnStartup(func() error {
+		return nil
+	})
+
+	dnsserver.GetConfig(c).AddPlugin(func(next plugin.Handler) plugin.Handler {
+		fmt.Println("Next")
+		p.Next = next
+		return p
+	})
+
 	return nil
 }

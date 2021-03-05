@@ -309,10 +309,10 @@ func (c *Client) QueryRecords(ctx context.Context, name string, questionTypes ..
 			Qclass: dns.ClassINET,
 		}
 	}
-	return c.query(ctx, questions...)
+	return c.Query(ctx, questions...)
 }
 
-func (c *Client) query(ctx context.Context, questions ...dns.Question) ([]dns.RR, error) {
+func (c *Client) Query(ctx context.Context, questions ...dns.Question) ([]dns.RR, error) {
 	// Start listening for response packets
 
 	// RFC 6762, section 18.12.  Repurposing of Top Bit of qclass in Question
@@ -356,7 +356,7 @@ func (c *Client) query(ctx context.Context, questions ...dns.Question) ([]dns.RR
 		for _, cname := range cnames {
 			answers = append(answers, cname)
 		}
-		return append(answers, records...)
+		return copyRecords(append(answers, records...))
 	}
 
 	if answers := fillAnswers(); answers != nil {
@@ -432,4 +432,12 @@ func (c *Client) send(q *dns.Msg) error {
 	}
 
 	return nil
+}
+
+func copyRecords(source []dns.RR) []dns.RR {
+	dest := make([]dns.RR, len(source))
+	for i, r := range source {
+		dest[i] = dns.Copy(r)
+	}
+	return dest
 }
