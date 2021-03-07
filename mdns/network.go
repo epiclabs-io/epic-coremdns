@@ -4,7 +4,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-type Transport interface {
+type transport interface {
 	Send(*dns.Msg) error
 	Receive() <-chan *dns.Msg
 	Close()

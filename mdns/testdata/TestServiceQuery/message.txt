@@ -1,0 +1,8 @@
+[
+	";; opcode: QUERY, status: NOERROR, id: 0",
+	";; flags:; QUERY: 1, ANSWER: 0, AUTHORITY: 0, ADDITIONAL: 0",
+	"",
+	";; QUESTION SECTION:",
+	";_service1._tcp.local.\tIN\t PTR",
+	""
+]

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/epiclabs-io/epicmdns/mdns/udptransport"
+	"github.com/epiclabs-io/ticker"
 	"github.com/miekg/dns"
 	"github.com/tilinna/clock"
 )
@@ -26,19 +27,20 @@ type Config struct {
 	MinTTL                uint32
 	BrowseServices        []string
 	BrowsePeriod          uint32
-	Transport             Transport
+	Transport             transport
+	Clock                 clock.Clock
 }
-
-var Clock = clock.Realtime()
 
 type Client struct {
 	Config
-	closed   int32
-	closedCh chan struct{}
-	lock     sync.RWMutex
-	cache    map[string][]*cacheEntry
-	cnames   map[string]*cacheEntry
-	signal   *signal
+	closed       int32
+	closedCh     chan struct{}
+	lock         sync.RWMutex
+	cache        map[string][]*cacheEntry
+	cnames       map[string]*cacheEntry
+	signal       *signal
+	purgeTicker  *ticker.Ticker
+	browseTicker *ticker.Ticker
 }
 
 func New(config *Config) (*Client, error) {
@@ -58,6 +60,9 @@ func New(config *Config) (*Client, error) {
 		}
 		config.Transport = transport
 	}
+	if config.Clock == nil {
+		config.Clock = clock.Realtime()
+	}
 
 	if config.BrowsePeriod == 0 {
 		config.BrowsePeriod = defaultBrowsePeriod
@@ -71,8 +76,21 @@ func New(config *Config) (*Client, error) {
 		cnames:   make(map[string]*cacheEntry),
 	}
 
-	go c.autoPurgeCache()
-	go c.autoServiceQuery()
+	c.purgeTicker = ticker.New(&ticker.Config{
+		Clock:    config.Clock,
+		Interval: 1 * time.Minute,
+		Callback: func() { c.purgeCache() },
+	})
+
+	c.browseTicker = ticker.New(&ticker.Config{
+		Clock:    config.Clock,
+		Interval: time.Duration(c.BrowsePeriod) * time.Second,
+		Callback: func() {
+			for _, s := range c.BrowseServices {
+				c.serviceQuery(s)
+			}
+		},
+	})
 
 	go c.messageLoop()
 
@@ -97,6 +115,8 @@ func (c *Client) Close() error {
 	}
 	close(c.closedCh)
 	c.Transport.Close()
+	c.purgeTicker.Stop()
+	c.browseTicker.Stop()
 	return nil
 }
 
@@ -104,7 +124,7 @@ func (c *Client) purgeCache() {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 
-	now := Clock.Now()
+	now := c.Clock.Now()
 	for domain, entries := range c.cache {
 		var newEntries []*cacheEntry
 		for _, entry := range entries {
@@ -125,24 +145,12 @@ func (c *Client) purgeCache() {
 	}
 }
 
-func (c *Client) autoPurgeCache() {
-	ticker := Clock.NewTicker(1 * time.Minute)
-	for {
-		select {
-		case <-ticker.C:
-			c.purgeCache()
-		case <-c.closedCh:
-			return
-		}
-	}
-}
-
 func (c *Client) processMessage(reply *dns.Msg) {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 
 	records := append(reply.Answer, reply.Extra...)
-	now := Clock.Now()
+	now := c.Clock.Now()
 
 process_replies:
 	for _, record := range records {
@@ -182,7 +190,7 @@ func (c *Client) getCachedAnswers(domain string, recordType uint16, cnames map[s
 	var answers []dns.RR
 
 	entries := c.cache[target]
-	now := Clock.Now()
+	now := c.Clock.Now()
 	if entries != nil {
 		for _, entry := range entries {
 			if entry.rr.Header().Rrtype == recordType && entry.expires.After(now) {
@@ -221,7 +229,7 @@ func (c *Client) getCachedAnswers(domain string, recordType uint16, cnames map[s
 
 func (c *Client) resolveCname(target string) ([]dns.RR, string) {
 	var chain []dns.RR
-	now := Clock.Now()
+	now := c.Clock.Now()
 	for {
 		entry := c.cnames[target]
 		if entry == nil {
@@ -237,24 +245,12 @@ func (c *Client) serviceQuery(service string) {
 	service = strings.Trim(service, ".") + "."
 	q := new(dns.Msg)
 	q.SetQuestion(service, dns.TypePTR)
-	q.Question[0].Qclass |= 1 << 15
+	if c.ForceUnicastResponses {
+		q.Question[0].Qclass |= 1 << 15
+	}
 	q.RecursionDesired = false
 	if err := c.Transport.Send(q); err != nil {
 		log.Printf("error: %s", err)
-	}
-}
-
-func (c *Client) autoServiceQuery() {
-	ticker := Clock.NewTicker(time.Duration(c.BrowsePeriod) * time.Second)
-	for {
-		select {
-		case <-ticker.C:
-			for _, s := range c.BrowseServices {
-				c.serviceQuery(s)
-			}
-		case <-c.closedCh:
-			return
-		}
 	}
 }
 
@@ -325,7 +321,7 @@ func (c *Client) Query(ctx context.Context, questions ...dns.Question) ([]dns.RR
 		return answers, nil
 	}
 
-	ticker := Clock.NewTicker(200 * time.Millisecond)
+	ticker := c.Clock.NewTicker(200 * time.Millisecond)
 
 	if err := c.Transport.Send(msg); err != nil {
 		return nil, err
