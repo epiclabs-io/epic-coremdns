@@ -76,6 +76,7 @@ func New(config *Config) (*UDPTransport, error) {
 	}, nil
 }
 
+// Send sends a dns message over all UDP connections
 func (u *UDPTransport) Send(msg *dns.Msg) error {
 	buf, err := msg.Pack()
 	if err != nil {
@@ -91,9 +92,13 @@ func (u *UDPTransport) Send(msg *dns.Msg) error {
 
 	return nil
 }
+
+// Receive returns a channel that outputs received dns messages
 func (u *UDPTransport) Receive() <-chan *dns.Msg {
 	return u.msgs
 }
+
+// Close shuts down all sockets
 func (u *UDPTransport) Close() {
 	close(u.closed)
 }
