@@ -26,12 +26,12 @@ func (p mdnsPlugin) Name() string { return "epicmdns" }
 
 func (p mdnsPlugin) ToLocal(input string) string {
 	// Replace input domain with .local
-	return strings.TrimSuffix(input, p.domain) + ".local."
+	return strings.TrimSuffix(input, p.domain) + "local."
 }
 
 func (p mdnsPlugin) FromLocal(local string) string {
 	// Replace .local to our domain
-	return strings.TrimSuffix(local, ".local.") + p.domain
+	return strings.TrimSuffix(local, "local.") + p.domain
 }
 
 func (p mdnsPlugin) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {

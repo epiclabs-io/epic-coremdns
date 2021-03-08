@@ -33,7 +33,7 @@ func parseConfig(c *caddyfile.Dispenser) (*config, error) {
 	var config config
 	c.Next()
 	if c.NextArg() {
-		config.Domain = "." + strings.TrimSuffix(c.Val(), ".") + "."
+		config.Domain = strings.TrimSuffix(c.Val(), ".") + "."
 		if c.NextBlock() {
 			for {
 				key := c.Val()

@@ -1,5 +1,5 @@
 {
-	"Domain": ".epiclabs.io.",
+	"Domain": "epiclabs.io.",
 	"ForceUnicastResponses": true,
 	"BindIPAddressV4": "1.2.3.4",
 	"BindIPAddressV6": "fe80::abc:cdef:123:4567",

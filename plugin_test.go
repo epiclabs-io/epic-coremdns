@@ -62,7 +62,7 @@ func TestServe(tx *testing.T) {
 	p := &mdnsPlugin{
 		mdns:   client,
 		Next:   &mockNextPlugin{},
-		domain: ".epiclabs.io.",
+		domain: "epiclabs.io.",
 	}
 
 	mrw := &mockResponseWriter{}
