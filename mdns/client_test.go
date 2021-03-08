@@ -112,7 +112,7 @@ func TestServiceQuery(tx *testing.T) {
 		ForceUnicastResponses: false,
 		Transport:             mt,
 		BrowseServices:        []string{"service1", "service2"},
-		BrowsePeriod:          100,
+		BrowsePeriod:          100 * time.Second,
 		Clock:                 clk,
 	})
 	t.Ok(err)
@@ -120,7 +120,7 @@ func TestServiceQuery(tx *testing.T) {
 
 	go func() {
 		for {
-			clk.Add(time.Duration(c.BrowsePeriod) * time.Second)
+			clk.Add(c.BrowsePeriod)
 			time.Sleep(10 * time.Millisecond)
 		}
 	}()
@@ -157,7 +157,7 @@ func TestCache(tx *testing.T) {
 
 	c, err := New(&Config{
 		Clock:            clk,
-		CachePurgePeriod: 5000,
+		CachePurgePeriod: 5000 * time.Second,
 		MinTTL:           50,
 		Transport:        mt,
 	})
@@ -321,13 +321,6 @@ func TestQuery(tx *testing.T) {
 	wg.Wait()
 	t.MustFail(queryErr, "Expected to have an error when context is cancelled")
 
-	// test ForceUnicast
-	/* 	c, err = New(&Config{
-		Clock:                 clk,
-		Transport:             mt,
-		RetryPeriod:           500 * time.Millisecond,
-		ForceUnicastResponses: true,
-	}) */
 	c.ForceUnicastResponses = true
 	t.Ok(err)
 

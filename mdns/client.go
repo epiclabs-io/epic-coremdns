@@ -3,35 +3,13 @@ package mdns
 import (
 	"context"
 	"log"
-	"net"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
-	"github.com/epiclabs-io/epicmdns/mdns/udptransport"
 	"github.com/epiclabs-io/ticker"
 	"github.com/miekg/dns"
-	"github.com/tilinna/clock"
 )
-
-// Discovery defaults.
-const (
-	defaultBrowsePeriod = 60
-)
-
-type Config struct {
-	ForceUnicastResponses bool
-	BindIPAddressV4       net.IP
-	BindIPAddressV6       net.IP
-	MinTTL                uint32
-	BrowseServices        []string
-	BrowsePeriod          uint32
-	CachePurgePeriod      uint32
-	RetryPeriod           time.Duration
-	Transport             transport
-	Clock                 clock.Clock
-}
 
 type Client struct {
 	Config
@@ -46,33 +24,8 @@ type Client struct {
 }
 
 func New(config *Config) (*Client, error) {
-	if config.BindIPAddressV4 == nil {
-		config.BindIPAddressV4 = net.IPv4zero
-	}
-	if config.BindIPAddressV6 == nil {
-		config.BindIPAddressV6 = net.IPv6zero
-	}
-	if config.Transport == nil {
-		transport, err := udptransport.New(&udptransport.Config{
-			BindIPAddressV4: config.BindIPAddressV4,
-			BindIPAddressV6: config.BindIPAddressV6,
-		})
-		if err != nil {
-			return nil, err
-		}
-		config.Transport = transport
-	}
-	if config.Clock == nil {
-		config.Clock = clock.Realtime()
-	}
-	if config.CachePurgePeriod == 0 {
-		config.CachePurgePeriod = 60
-	}
-	if config.BrowsePeriod == 0 {
-		config.BrowsePeriod = defaultBrowsePeriod
-	}
-	if config.RetryPeriod == 0*time.Millisecond {
-		config.RetryPeriod = 200 * time.Millisecond
+	if err := config.ApplyDefaults(); err != nil {
+		return nil, err
 	}
 
 	c := &Client{
@@ -85,13 +38,13 @@ func New(config *Config) (*Client, error) {
 
 	c.purgeTicker = ticker.New(&ticker.Config{
 		Clock:    config.Clock,
-		Interval: time.Duration(config.CachePurgePeriod) * time.Second,
+		Interval: config.CachePurgePeriod,
 		Callback: func() { c.purgeCache() },
 	})
 
 	c.browseTicker = ticker.New(&ticker.Config{
 		Clock:    config.Clock,
-		Interval: time.Duration(c.BrowsePeriod) * time.Second,
+		Interval: c.BrowsePeriod,
 		Callback: func() {
 			for _, s := range c.BrowseServices {
 				c.serviceQuery(s)
@@ -102,17 +55,6 @@ func New(config *Config) (*Client, error) {
 	go c.messageLoop()
 
 	return c, nil
-}
-
-func (c *Client) newCacheEntry(rr dns.RR, now time.Time) *cacheEntry {
-	ttl := rr.Header().Ttl
-	if ttl < c.MinTTL {
-		ttl = c.MinTTL
-	}
-	return &cacheEntry{
-		expires: now.Add(time.Second * time.Duration(ttl)),
-		rr:      rr,
-	}
 }
 
 func (c *Client) Close() error {
@@ -127,57 +69,6 @@ func (c *Client) Close() error {
 	return nil
 }
 
-func (c *Client) purgeCache() {
-	c.lock.Lock()
-	defer c.lock.Unlock()
-
-	now := c.Clock.Now()
-	for domain, entries := range c.cache {
-		var newEntries []*cacheEntry
-		for _, entry := range entries {
-			if entry.expires.After(now) {
-				newEntries = append(newEntries, entry)
-			}
-		}
-		if len(newEntries) > 0 {
-			c.cache[domain] = newEntries
-		} else {
-			delete(c.cache, domain)
-		}
-	}
-	for domain, entry := range c.cnames {
-		if entry.expires.After(now) {
-			delete(c.cnames, domain)
-		}
-	}
-}
-
-func (c *Client) addToCache(records []dns.RR) {
-	c.lock.Lock()
-	defer c.lock.Unlock()
-
-	now := c.Clock.Now()
-
-process_replies:
-	for _, record := range records {
-		name := record.Header().Name
-		if record.Header().Rrtype == dns.TypeCNAME {
-			c.cnames[name] = c.newCacheEntry(record.(*dns.CNAME), now)
-		} else {
-			entries := c.cache[name]
-			for i, entry := range entries {
-				if dns.IsDuplicate(entry.rr, record) {
-					if record.Header().Ttl > entry.ttl(now) {
-						entries[i] = c.newCacheEntry(record, now)
-					}
-					continue process_replies
-				}
-			}
-			c.cache[name] = append(entries, c.newCacheEntry(record, now))
-		}
-	}
-}
-
 func (c *Client) messageLoop() {
 	for {
 		select {
@@ -187,63 +78,6 @@ func (c *Client) messageLoop() {
 			c.addToCache(append(reply.Answer, reply.Extra...))
 			c.signal.raise()
 		}
-	}
-}
-
-func (c *Client) getCachedAnswers(domain string, recordType uint16, cnames map[string]dns.RR) []dns.RR {
-	chain, target := c.resolveCname(domain)
-
-	var answers []dns.RR
-
-	entries := c.cache[target]
-	now := c.Clock.Now()
-	if entries != nil {
-		for _, entry := range entries {
-			if entry.rr.Header().Rrtype == recordType && entry.expires.After(now) {
-				rr := entry.rr
-				rr.Header().Ttl = entry.ttl(now)
-				answers = append(answers, rr)
-			}
-		}
-	}
-	if len(answers) == 0 {
-		return nil
-	}
-
-	for _, cname := range chain {
-		cnames[cname.Header().Name] = cname
-	}
-
-	var followup []dns.RR
-	switch recordType {
-	case dns.TypePTR:
-		for _, rr := range answers {
-			ptr := rr.(*dns.PTR)
-			followup = append(followup, c.getCachedAnswers(ptr.Ptr, dns.TypeTXT, cnames)...)
-			followup = append(followup, c.getCachedAnswers(ptr.Ptr, dns.TypeSRV, cnames)...)
-		}
-	case dns.TypeSRV:
-		for _, rr := range answers {
-			srv := rr.(*dns.SRV)
-			followup = append(followup, c.getCachedAnswers(srv.Target, dns.TypeA, cnames)...)
-			followup = append(followup, c.getCachedAnswers(srv.Target, dns.TypeAAAA, cnames)...)
-		}
-	}
-
-	return append(answers, followup...)
-}
-
-func (c *Client) resolveCname(target string) ([]dns.RR, string) {
-	var chain []dns.RR
-	now := c.Clock.Now()
-	for {
-		entry := c.cnames[target]
-		if entry == nil {
-			return chain, target
-		}
-		entry.rr.Header().Ttl = entry.ttl(now)
-		chain = append(chain, entry.rr)
-		target = entry.cname().Target
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/coredns/caddy"
 	"github.com/epiclabs-io/epicmdns/mdns"
@@ -55,7 +56,14 @@ func parseConfig(c *caddy.Controller) (*config, error) {
 					if err != nil {
 						return nil, errors.New("Cannot parse browse_period")
 					}
-					config.BrowsePeriod = uint32(period)
+					config.BrowsePeriod = time.Duration(period) * time.Second
+
+				case "retry_period":
+					period, err := strconv.ParseUint(value, 10, 32)
+					if err != nil {
+						return nil, errors.New("Cannot parse retry_period")
+					}
+					config.RetryPeriod = time.Duration(period) * time.Second
 
 				}
 				if !c.NextBlock() {
