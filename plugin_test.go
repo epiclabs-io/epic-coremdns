@@ -59,7 +59,7 @@ func TestServe(tx *testing.T) {
 
 	// configure plugin to map epiclabs.io to mdns .local
 	client := &mockMdnsClient{}
-	p := &Plugin{
+	p := &mdnsPlugin{
 		mdns:   client,
 		Next:   &mockNextPlugin{},
 		domain: ".epiclabs.io.",

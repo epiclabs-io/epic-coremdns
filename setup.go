@@ -30,7 +30,7 @@ func setup(c *caddy.Controller) error {
 	}
 
 	// setup plugin
-	p := Plugin{
+	p := mdnsPlugin{
 		mdns:   mdnsClient,
 		domain: config.Domain,
 	}

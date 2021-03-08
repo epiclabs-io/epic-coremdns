@@ -16,25 +16,25 @@ type mdnsclient interface {
 	Query(ctx context.Context, questions ...dns.Question) ([]dns.RR, error)
 }
 
-type Plugin struct {
+type mdnsPlugin struct {
 	mdns   mdnsclient
 	Next   plugin.Handler
 	domain string
 }
 
-func (p Plugin) Name() string { return "epicmdns" }
+func (p mdnsPlugin) Name() string { return "epicmdns" }
 
-func (p Plugin) ToLocal(input string) string {
+func (p mdnsPlugin) ToLocal(input string) string {
 	// Replace input domain with .local
 	return strings.TrimSuffix(input, p.domain) + ".local."
 }
 
-func (p Plugin) FromLocal(local string) string {
+func (p mdnsPlugin) FromLocal(local string) string {
 	// Replace .local to our domain
 	return strings.TrimSuffix(local, ".local.") + p.domain
 }
 
-func (p Plugin) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
+func (p mdnsPlugin) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
 	msg := new(dns.Msg)
 	msg.SetReply(r)
 	msg.Authoritative = true
