@@ -6,11 +6,13 @@ import (
 	"github.com/miekg/dns"
 )
 
+// cacheEntry keeps track of a dns record in cache
 type cacheEntry struct {
 	expires time.Time
 	rr      dns.RR
 }
 
+// ttl computes back the TTL based on what time it is now
 func (e *cacheEntry) ttl(now time.Time) uint32 {
 	if ttl := e.expires.Sub(now).Seconds(); ttl > 0 {
 		return uint32(ttl)
@@ -18,10 +20,12 @@ func (e *cacheEntry) ttl(now time.Time) uint32 {
 	return 0
 }
 
+// cname casts the record to a CNAME struct
 func (e *cacheEntry) cname() *dns.CNAME {
 	return e.rr.(*dns.CNAME)
 }
 
+// newCacheEntry creates a new DNS record cache entry
 func (c *Client) newCacheEntry(rr dns.RR, now time.Time) *cacheEntry {
 	ttl := rr.Header().Ttl
 	if ttl < c.MinTTL {
@@ -33,6 +37,7 @@ func (c *Client) newCacheEntry(rr dns.RR, now time.Time) *cacheEntry {
 	}
 }
 
+// purgeCache evicts expired records off the cache
 func (c *Client) purgeCache() {
 	c.lock.Lock()
 	defer c.lock.Unlock()
@@ -58,6 +63,8 @@ func (c *Client) purgeCache() {
 	}
 }
 
+// addToCache adds the list of records to the cache
+// updating existing items if necessary
 func (c *Client) addToCache(records []dns.RR) {
 	c.lock.Lock()
 	defer c.lock.Unlock()
@@ -84,6 +91,7 @@ process_replies:
 	}
 }
 
+// resolveCname attempts to retrieve from the cache the list of related cnames
 func (c *Client) resolveCname(target string) ([]dns.RR, string) {
 	var chain []dns.RR
 	now := c.Clock.Now()
@@ -98,6 +106,8 @@ func (c *Client) resolveCname(target string) ([]dns.RR, string) {
 	}
 }
 
+// getCachedAnswers attempts to retrieve from cache a collection of records that answer a single question
+// trying to facilitate records that would be requested as well
 func (c *Client) getCachedAnswers(domain string, recordType uint16, cnames map[string]dns.RR) []dns.RR {
 	chain, target := c.resolveCname(domain)
 

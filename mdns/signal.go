@@ -1,5 +1,6 @@
 package mdns
 
+// signal is a simple way to release a number of goroutines when something happens
 type signal struct {
 	c chan struct{}
 }

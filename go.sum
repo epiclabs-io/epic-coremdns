@@ -124,10 +124,6 @@ github.com/epiclabs-io/diff3 v0.0.0-20181217103619-05282cece609 h1:KHcpmcC/8cnCD
 github.com/epiclabs-io/diff3 v0.0.0-20181217103619-05282cece609/go.mod h1:tM499ZoH5jQRF3wlMnl59SJQwVYXIBdJRZa/K71p0IM=
 github.com/epiclabs-io/ticker v0.0.0-20210217212424-32a7825c498e h1:V4RRMINcC+VbLX9PKRgCkL1kO1h/KpzvKLyfnrJ5mR4=
 github.com/epiclabs-io/ticker v0.0.0-20210217212424-32a7825c498e/go.mod h1:v9bFQHd5CNI38VUAtbI9l2QcBlmtGJzPpiGPS/CM0AQ=
-github.com/epiclabs-io/ut v0.0.0-20201221095005-a2a4f565f0d0 h1:mM/cqhrPWaJ3xUF4Sp4H+Zfg4kQ4/lwb1AYTg3Ig9QQ=
-github.com/epiclabs-io/ut v0.0.0-20201221095005-a2a4f565f0d0/go.mod h1:Sm6PW7b/nLOHEn3XxuUOXFYA4xFkLUnyAWUOcTGcRZ4=
-github.com/epiclabs-io/ut v0.0.0-20210307212937-be13a1f12bb8 h1:/rwr1D/55qpJX/wbyAgaUvrIusC1XnwnE+3TKGLjbAg=
-github.com/epiclabs-io/ut v0.0.0-20210307212937-be13a1f12bb8/go.mod h1:M1tKbAhtmqLzVA2NvUdYwhHh6Hh3vhFn4SJgorw3jlA=
 github.com/epiclabs-io/ut v0.0.0-20210307214010-1babf69b092b h1:9xvGOjPtrasMdOnrzYjc4JVlZMoMcFluLQrKxdOd5v8=
 github.com/epiclabs-io/ut v0.0.0-20210307214010-1babf69b092b/go.mod h1:M1tKbAhtmqLzVA2NvUdYwhHh6Hh3vhFn4SJgorw3jlA=
 github.com/evanphx/json-patch v4.9.0+incompatible/go.mod h1:50XU6AFN0ol/bzJsmQLiYLvXMP4fmwYFNcr97nuDLSk=

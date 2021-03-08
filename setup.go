@@ -1,14 +1,13 @@
 package epicmdns
 
 import (
-	"fmt"
-
 	"github.com/coredns/caddy"
 	"github.com/coredns/coredns/core/dnsserver"
 	"github.com/coredns/coredns/plugin"
 	"github.com/epiclabs-io/epicmdns/mdns"
 )
 
+// register with CoreDNS on module load
 func init() {
 	caddy.RegisterPlugin("epicmdns", caddy.Plugin{
 		ServerType: "dns",
@@ -16,27 +15,28 @@ func init() {
 	})
 }
 
+// setup parses the configuration and launches the plug-in
 func setup(c *caddy.Controller) error {
+	// parse configuration
 	config, err := parseConfig(&c.Dispenser)
 	if err != nil {
 		return err
 	}
 
+	// instantiate mdns resolver
 	mdnsClient, err := mdns.New(&config.Config)
 	if err != nil {
 		return err
 	}
+
+	// setup plugin
 	p := Plugin{
 		mdns:   mdnsClient,
 		domain: config.Domain,
 	}
 
-	c.OnStartup(func() error {
-		return nil
-	})
-
+	// Add plug-in to the chain
 	dnsserver.GetConfig(c).AddPlugin(func(next plugin.Handler) plugin.Handler {
-		fmt.Println("Next")
 		p.Next = next
 		return p
 	})

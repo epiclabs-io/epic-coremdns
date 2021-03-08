@@ -18,21 +18,22 @@ var (
 	mDNSAddr6 = &net.UDPAddr{IP: net.ParseIP(mDNSIP6), Port: mDNSPort}
 )
 
-type UdpTransport struct {
-	// unicast
-	uc4, uc6 *net.UDPConn
-	// Multicast
-	mc4, mc6 *net.UDPConn
+// UDPTransport implements the transport interface with UDP
+type UDPTransport struct {
+	uc4, uc6 *net.UDPConn // unicasts sockets
+	mc4, mc6 *net.UDPConn // multicast sockets
 	closed   chan struct{}
 	msgs     chan *dns.Msg
 }
 
+// Config contains the configuration for UDPTransport
 type Config struct {
-	BindIPAddressV4 net.IP
+	BindIPAddressV4 net.IP // Address to bind to
 	BindIPAddressV6 net.IP
 }
 
-func New(config *Config) (*UdpTransport, error) {
+// New instantiates a new UDPTransport
+func New(config *Config) (*UDPTransport, error) {
 	if config.BindIPAddressV4 == nil {
 		config.BindIPAddressV4 = net.IPv4zero
 	}
@@ -65,7 +66,7 @@ func New(config *Config) (*UdpTransport, error) {
 	go recv(mc4, msgs, closed)
 	go recv(mc6, msgs, closed)
 
-	return &UdpTransport{
+	return &UDPTransport{
 		uc4:    uc4,
 		uc6:    uc6,
 		mc4:    mc4,
@@ -75,7 +76,7 @@ func New(config *Config) (*UdpTransport, error) {
 	}, nil
 }
 
-func (u *UdpTransport) Send(msg *dns.Msg) error {
+func (u *UDPTransport) Send(msg *dns.Msg) error {
 	buf, err := msg.Pack()
 	if err != nil {
 		return err
@@ -90,13 +91,15 @@ func (u *UdpTransport) Send(msg *dns.Msg) error {
 
 	return nil
 }
-func (u *UdpTransport) Receive() <-chan *dns.Msg {
+func (u *UDPTransport) Receive() <-chan *dns.Msg {
 	return u.msgs
 }
-func (u *UdpTransport) Close() {
+func (u *UDPTransport) Close() {
 	close(u.closed)
 }
 
+// recv reads and parses all DNS packets coming from the socket and sends them
+// over the channel
 func recv(l *net.UDPConn, msgCh chan *dns.Msg, closed chan struct{}) {
 	if l == nil {
 		return

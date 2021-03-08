@@ -5,10 +5,12 @@ import (
 	"strings"
 
 	"github.com/coredns/coredns/plugin"
-	"github.com/coredns/coredns/request"
 	"github.com/miekg/dns"
-	"github.com/prometheus/common/log"
+
+	clog "github.com/coredns/coredns/plugin/pkg/log"
 )
+
+var log = clog.NewWithPlugin("epicmdns")
 
 type mdnsclient interface {
 	Query(ctx context.Context, questions ...dns.Question) ([]dns.RR, error)
@@ -33,19 +35,19 @@ func (p Plugin) FromLocal(local string) string {
 }
 
 func (p Plugin) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
-	log.Debug("Received query")
 	msg := new(dns.Msg)
 	msg.SetReply(r)
 	msg.Authoritative = true
 	msg.RecursionAvailable = true
-	req := request.Request{W: w, Req: r}
-	log.Debugf("Looking for name: %s", req.QName())
+	name := r.Question[0].Name
+	log.Debugf("Looking for name: %s", name)
 
-	if !strings.HasSuffix(req.QName(), p.domain) {
-		log.Debugf("Skipping due to query '%s' not in our domain '%s'", req.QName(), p.domain)
+	if !strings.HasSuffix(name, p.domain) {
+		log.Debugf("Ignoring %q not in configured domain %q", name, p.domain)
 		return plugin.NextOrFailure(p.Name(), p.Next, ctx, w, r)
 	}
 
+	// Translate questions to `.local` domain:
 	questions := make([]dns.Question, len(r.Question))
 	for i, q := range r.Question {
 		questions[i] = dns.Question{
@@ -55,12 +57,14 @@ func (p Plugin) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 		}
 	}
 
+	// query mDNS
 	answers, err := p.mdns.Query(ctx, questions...)
 	if err != nil {
-		log.Debugf("Error resolving %s: %s\n", req.QName(), err)
+		log.Debugf("Error looking up %s: %s", name, err)
 		return plugin.NextOrFailure(p.Name(), p.Next, ctx, w, r)
 	}
 
+	// map responses to configured domain:
 	for _, ans := range answers {
 		ans.Header().Name = p.FromLocal(ans.Header().Name)
 		switch r := ans.(type) {
@@ -73,6 +77,7 @@ func (p Plugin) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 		}
 	}
 
+	// return to CoreDNS
 	msg.Answer = answers
 	return dns.RcodeSuccess, w.WriteMsg(msg)
 }

@@ -10,6 +10,7 @@ import (
 	"github.com/miekg/dns"
 )
 
+//mockMdnsClient returns a mock query which can optionally fail
 type mockMdnsClient struct {
 	fail bool
 }
@@ -29,19 +30,21 @@ func (m *mockMdnsClient) Query(ctx context.Context, questions ...dns.Question) (
 	return answer, nil
 }
 
+// mockResponseWriter just stores the written response for test verification
 type mockResponseWriter struct {
 	msg *dns.Msg
 }
 
+func (mrw *mockResponseWriter) WriteMsg(msg *dns.Msg) error { mrw.msg = msg; return nil }
 func (mrw *mockResponseWriter) LocalAddr() net.Addr         { panic("not implemented") }
 func (mrw *mockResponseWriter) RemoteAddr() net.Addr        { panic("not implemented") }
-func (mrw *mockResponseWriter) WriteMsg(msg *dns.Msg) error { mrw.msg = msg; return nil }
 func (mrw *mockResponseWriter) Write([]byte) (int, error)   { panic("not implemented") }
 func (mrw *mockResponseWriter) Close() error                { panic("not implemented") }
 func (mrw *mockResponseWriter) TsigStatus() error           { panic("not implemented") }
 func (mrw *mockResponseWriter) TsigTimersOnly(bool)         { panic("not implemented") }
 func (mrw *mockResponseWriter) Hijack()                     { panic("not implemented") }
 
+// mockNextPlugin is the mock next plugin in the chain, which always fails
 type mockNextPlugin struct {
 }
 
@@ -54,6 +57,7 @@ func TestServe(tx *testing.T) {
 	t := ut.BeginTest(tx, false)
 	defer t.FinishTest()
 
+	// configure plugin to map epiclabs.io to mdns .local
 	client := &mockMdnsClient{}
 	p := &Plugin{
 		mdns:   client,
@@ -66,17 +70,20 @@ func TestServe(tx *testing.T) {
 	msg := new(dns.Msg)
 	msg.Question = []dns.Question{q}
 
+	// Invoke ServeDNS with a PTR query
 	code, err := p.ServeDNS(context.Background(), mrw, msg)
 	t.Ok(err)
 	t.Equals(dns.RcodeSuccess, code)
 	mrw.msg.Id = 0
 	t.EqualsTextFile("query.txt", mrw.msg.String())
 
+	// repeat query, this time force a failure
 	client.fail = true
 	code, err = p.ServeDNS(context.Background(), mrw, msg)
 	t.MustFail(err, "Expected ServeDNS to fail since query failed")
 	t.Equals(dns.RcodeSuccess, code)
 
+	// do another query of an unrelated domain, should fail:
 	client.fail = false
 	q = dns.Question{Name: "www.someotherdomain.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	msg = new(dns.Msg)
@@ -85,5 +92,4 @@ func TestServe(tx *testing.T) {
 	code, err = p.ServeDNS(context.Background(), mrw, msg)
 	t.MustFail(err, "Expected ServeDNS to fail since requested domain is not the configured domain")
 	t.Equals(dns.RcodeSuccess, code)
-
 }
