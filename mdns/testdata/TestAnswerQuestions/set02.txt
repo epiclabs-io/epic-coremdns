@@ -1,0 +1,8 @@
+;; opcode: QUERY, status: NOERROR, id: 0
+;; flags:; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 0
+
+;; QUESTION SECTION:
+;www.epiclabs.io.	IN	 CNAME
+
+;; ANSWER SECTION:
+www.epiclabs.io.	300	IN	CNAME	myserver.epiclabs.io.

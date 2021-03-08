@@ -10,7 +10,7 @@ func newSignal() *signal {
 	}
 }
 
-func (s *signal) wait() <-chan struct{} {
+func (s *signal) waitCh() <-chan struct{} {
 	return s.c
 }
 

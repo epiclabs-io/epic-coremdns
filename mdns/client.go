@@ -27,6 +27,8 @@ type Config struct {
 	MinTTL                uint32
 	BrowseServices        []string
 	BrowsePeriod          uint32
+	CachePurgePeriod      uint32
+	RetryPeriod           time.Duration
 	Transport             transport
 	Clock                 clock.Clock
 }
@@ -63,9 +65,14 @@ func New(config *Config) (*Client, error) {
 	if config.Clock == nil {
 		config.Clock = clock.Realtime()
 	}
-
+	if config.CachePurgePeriod == 0 {
+		config.CachePurgePeriod = 60
+	}
 	if config.BrowsePeriod == 0 {
 		config.BrowsePeriod = defaultBrowsePeriod
+	}
+	if config.RetryPeriod == 0*time.Millisecond {
+		config.RetryPeriod = 200 * time.Millisecond
 	}
 
 	c := &Client{
@@ -78,7 +85,7 @@ func New(config *Config) (*Client, error) {
 
 	c.purgeTicker = ticker.New(&ticker.Config{
 		Clock:    config.Clock,
-		Interval: 1 * time.Minute,
+		Interval: time.Duration(config.CachePurgePeriod) * time.Second,
 		Callback: func() { c.purgeCache() },
 	})
 
@@ -137,19 +144,18 @@ func (c *Client) purgeCache() {
 		} else {
 			delete(c.cache, domain)
 		}
-		for domain, entry := range c.cnames {
-			if entry.expires.After(now) {
-				delete(c.cnames, domain)
-			}
+	}
+	for domain, entry := range c.cnames {
+		if entry.expires.After(now) {
+			delete(c.cnames, domain)
 		}
 	}
 }
 
-func (c *Client) processMessage(reply *dns.Msg) {
+func (c *Client) addToCache(records []dns.RR) {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 
-	records := append(reply.Answer, reply.Extra...)
 	now := c.Clock.Now()
 
 process_replies:
@@ -178,7 +184,7 @@ func (c *Client) messageLoop() {
 		case <-c.closedCh:
 			return
 		case reply := <-c.Transport.Receive():
-			c.processMessage(reply)
+			c.addToCache(append(reply.Answer, reply.Extra...))
 			c.signal.raise()
 		}
 	}
@@ -254,20 +260,6 @@ func (c *Client) serviceQuery(service string) {
 	}
 }
 
-func (c *Client) QueryRecords(ctx context.Context, name string, questionTypes ...uint16) ([]dns.RR, error) {
-	name = strings.Trim(name, ".") + "."
-	questions := make([]dns.Question, len(questionTypes))
-
-	for i, recordType := range questionTypes {
-		questions[i] = dns.Question{
-			Name:   name,
-			Qtype:  recordType,
-			Qclass: dns.ClassINET,
-		}
-	}
-	return c.Query(ctx, questions...)
-}
-
 func (c *Client) answerQuestions(questions []dns.Question) []dns.RR {
 	var records []dns.RR
 	cnames := make(map[string]dns.RR)
@@ -307,8 +299,8 @@ func (c *Client) Query(ctx context.Context, questions ...dns.Question) ([]dns.RR
 	// field is used to indicate that unicast responses are preferred for this
 	// particular question.  (See Section 5.4.)
 	if c.ForceUnicastResponses {
-		for _, q := range questions {
-			q.Qclass |= 1 << 15
+		for i, _ := range questions {
+			questions[i].Qclass |= 1 << 15
 		}
 	}
 
@@ -321,7 +313,7 @@ func (c *Client) Query(ctx context.Context, questions ...dns.Question) ([]dns.RR
 		return answers, nil
 	}
 
-	ticker := c.Clock.NewTicker(200 * time.Millisecond)
+	ticker := c.Clock.NewTicker(c.RetryPeriod)
 
 	if err := c.Transport.Send(msg); err != nil {
 		return nil, err
@@ -333,7 +325,7 @@ func (c *Client) Query(ctx context.Context, questions ...dns.Question) ([]dns.RR
 			if err := c.Transport.Send(msg); err != nil {
 				return nil, err
 			}
-		case <-c.signal.wait():
+		case <-c.signal.waitCh():
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}

@@ -1,0 +1,2 @@
+_service1._tcp.local.	5	IN	PTR	demo._service1._tcp.local.
+demo._service1._tcp.local.	25	IN	TXT	"more demo text"

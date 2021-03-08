@@ -1,0 +1,3 @@
+demo._service1._tcp.local.	230	IN	TXT	"demo text"
+myserver.epiclabs.io.	300	IN	A	10.10.10.10
+www.epiclabs.io.	300	IN	CNAME	myserver.epiclabs.io.

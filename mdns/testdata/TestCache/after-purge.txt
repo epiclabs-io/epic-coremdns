@@ -1,0 +1,2 @@
+demo._service1._tcp.local.	15	IN	TXT	"more demo text"
+myserver.epiclabs.io.	155	IN	A	10.10.10.10

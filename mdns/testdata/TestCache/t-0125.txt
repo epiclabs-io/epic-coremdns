@@ -1,0 +1,6 @@
+_service1._tcp.local.	115	IN	PTR	demo._service1._tcp.local.
+_service1._tcp.local.	75	IN	PTR	epic._service1._tcp.local.
+demo._service1._tcp.local.	105	IN	TXT	"demo text"
+demo._service1._tcp.local.	135	IN	TXT	"more demo text"
+epic._service1._tcp.local.	105	IN	SRV	1 2 7979 praetor.epiclabs.io.
+epic._service1._tcp.local.	115	IN	TXT	"some text"

@@ -1,0 +1,9 @@
+_service1._tcp.local.	135	IN	PTR	demo._service1._tcp.local.
+_service1._tcp.local.	95	IN	PTR	epic._service1._tcp.local.
+demo._service1._tcp.local.	125	IN	TXT	"demo text"
+demo._service1._tcp.local.	155	IN	TXT	"more demo text"
+epic._service1._tcp.local.	125	IN	SRV	1 2 7979 praetor.epiclabs.io.
+epic._service1._tcp.local.	135	IN	TXT	"some text"
+praetor.epiclabs.io.	145	IN	CNAME	primus.epiclabs.io.
+primus.epiclabs.io.	15	IN	A	1.2.3.4
+primus.epiclabs.io.	5	IN	AAAA	fe80::abc:cdef:123:4567
