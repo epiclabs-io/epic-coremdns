@@ -7,20 +7,20 @@ import (
 	"strings"
 	"time"
 
-	"github.com/coredns/caddy"
+	"github.com/coredns/caddy/caddyfile"
 	"github.com/epiclabs-io/epicmdns/mdns"
 )
 
 type config struct {
-	domain string
+	Domain string
 	mdns.Config
 }
 
-func parseConfig(c *caddy.Controller) (*config, error) {
+func parseConfig(c *caddyfile.Dispenser) (*config, error) {
 	var config config
 	c.Next()
 	if c.NextArg() {
-		config.domain = "." + strings.TrimSuffix(c.Val(), ".") + "."
+		config.Domain = "." + strings.TrimSuffix(c.Val(), ".") + "."
 		if c.NextBlock() {
 			for {
 				key := c.Val()
@@ -57,13 +57,18 @@ func parseConfig(c *caddy.Controller) (*config, error) {
 						return nil, errors.New("Cannot parse browse_period")
 					}
 					config.BrowsePeriod = time.Duration(period) * time.Second
-
 				case "retry_period":
-					period, err := strconv.ParseUint(value, 10, 32)
+					period, err := strconv.ParseFloat(value, 32)
 					if err != nil {
 						return nil, errors.New("Cannot parse retry_period")
 					}
-					config.RetryPeriod = time.Duration(period) * time.Second
+					config.RetryPeriod = time.Duration(period*1000) * time.Millisecond
+				case "cache_purge_period":
+					period, err := strconv.ParseUint(value, 10, 32)
+					if err != nil {
+						return nil, errors.New("Cannot parse cache_period")
+					}
+					config.CachePurgePeriod = time.Duration(period) * time.Second
 
 				}
 				if !c.NextBlock() {

@@ -1,0 +1,16 @@
+{
+	"Domain": ".epiclabs.io.",
+	"ForceUnicastResponses": true,
+	"BindIPAddressV4": "1.2.3.4",
+	"BindIPAddressV6": "fe80::abc:cdef:123:4567",
+	"MinTTL": 120,
+	"BrowseServices": [
+		"_workstation._tcp.local",
+		"service1._tcp.local"
+	],
+	"BrowsePeriod": 120000000000,
+	"CachePurgePeriod": 60000000000,
+	"RetryPeriod": 300000000,
+	"Transport": null,
+	"Clock": null
+}

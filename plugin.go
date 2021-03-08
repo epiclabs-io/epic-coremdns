@@ -6,13 +6,16 @@ import (
 
 	"github.com/coredns/coredns/plugin"
 	"github.com/coredns/coredns/request"
-	"github.com/epiclabs-io/epicmdns/mdns"
 	"github.com/miekg/dns"
 	"github.com/prometheus/common/log"
 )
 
+type mdnsclient interface {
+	Query(ctx context.Context, questions ...dns.Question) ([]dns.RR, error)
+}
+
 type Plugin struct {
-	mdns   *mdns.Client
+	mdns   mdnsclient
 	Next   plugin.Handler
 	domain string
 }

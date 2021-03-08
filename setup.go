@@ -17,7 +17,7 @@ func init() {
 }
 
 func setup(c *caddy.Controller) error {
-	config, err := parseConfig(c)
+	config, err := parseConfig(&c.Dispenser)
 	if err != nil {
 		return err
 	}
@@ -28,7 +28,7 @@ func setup(c *caddy.Controller) error {
 	}
 	p := Plugin{
 		mdns:   mdnsClient,
-		domain: config.domain,
+		domain: config.Domain,
 	}
 
 	c.OnStartup(func() error {

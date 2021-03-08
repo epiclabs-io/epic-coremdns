@@ -1,0 +1,13 @@
+;; opcode: QUERY, status: NOERROR, id: 0
+;; flags: qr aa ra; QUERY: 1, ANSWER: 6, AUTHORITY: 0, ADDITIONAL: 0
+
+;; QUESTION SECTION:
+;_service1._tcp.epiclabs.io.	IN	 PTR
+
+;; ANSWER SECTION:
+_service1._tcp.epiclabs.io.	200	IN	PTR	epic._service1._tcp.epiclabs.io.
+epic._service1._tcp.epiclabs.io.	230	IN	SRV	1 2 7979 praetor.epiclabs.io.
+epic._service1._tcp.epiclabs.io.	240	IN	TXT	"some text"
+praetor.epiclabs.io.	250	IN	CNAME	primus.epiclabs.io.
+primus.epiclabs.io.	120	IN	A	1.2.3.4
+primus.epiclabs.io.	110	IN	AAAA	fe80::abc:cdef:123:4567
